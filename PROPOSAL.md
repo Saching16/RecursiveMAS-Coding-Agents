@@ -3,6 +3,10 @@
 > **Purpose:** Living plan for collaborators and Cursor. Maps claims to this repo +
 > the planned [LangChain Deep Agents](https://github.com/langchain-ai/deepagents) integration.
 >
+> **Engineering prerequisites:** see [`PLAN.md`](PLAN.md) for the verified environment
+> state and the Gate 0 checklist that must pass before `integrations/deepagents_latent/`
+> is written. As of 2026-08-24 the RecursiveMAS imports do **not** resolve locally.
+>
 > **Supersedes:** the adaptive-halting framing in the May 2026 draft of this file and
 > `PROPOSAL_LONGFORM.md` (long-form text / AgentWrite / narrative domains).
 
