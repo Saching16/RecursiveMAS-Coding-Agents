@@ -6,13 +6,19 @@ Source: `PROPOSAL.md` section 7.
 
 Measure how latent channel capacity affects delegation quality by sweeping `latent_steps`.
 
+This sweep is one-shot: the whole budget is spent on a single handoff. Exp 4c extends the same axis across rounds — the same total budget split as 1x48, 2x24, or 3x16 — so the medium-tier task manifest and budget values frozen here are reused there.
+
 ## Research Question
 
-RQ2: How does latent channel capacity limit delegation quality?
+RQ2: How does channel capacity limit delegation quality, and does the latent channel buy more per unit of budget than text?
 
 ## Hypothesis
 
-If latent delegation is capacity-limited, task success should show a measurable cliff or improvement across `latent_steps` values, and that pattern should correlate with probe recovery from Exp 3a.
+If latent delegation is capacity-limited, task success should show a measurable cliff or improvement across `latent_steps` values, and that pattern should correlate with probe recovery from Exp 3a. If latent representations are denser than text, the latent curve should sit above the token-matched text curve at equal budget.
+
+## Why the text curve belongs in this experiment
+
+The bundle after the outer link is `[latent_steps, target_hidden]` — literally `latent_steps` embedding rows spliced into the receiver's prompt. So `latent_steps` is a token budget, and a latent-only sweep answers "does more budget help" rather than "is latent a better use of budget". Running Text-DA-cap(k) at the same `k` costs one extra arm and converts the deliverable from a single curve into the comparison the RQ actually asks for.
 
 ## Fixed Inputs
 
@@ -24,15 +30,16 @@ If latent delegation is capacity-limited, task success should show a measurable 
 
 ## Capacity Settings
 
-| Config | `latent_steps` |
-|---|---:|
-| Latent-DA-16 | 16 |
-| Latent-DA-32 | 32 |
-| Latent-DA-48 | 48 |
+| Config | Budget | Notes |
+|---|---:|---|
+| Latent-DA-0 | 0 | Null channel. Already supported: every latent stage returns an empty `[0, out_dim]` tensor when `latent_steps == 0` |
+| Latent-DA-16 | 16 | |
+| Latent-DA-32 | 32 | Exp 0 / Exp 1 default |
+| Latent-DA-48 | 48 | |
+| Text-DA-cap(16 / 32 / 48) | 16 / 32 / 48 tokens | Matched text budget, same task subset |
+| Text-DA (uncapped) | full | Carried forward from Exp 1 as the right-hand asymptote |
 
-Optional reference:
-
-- Text-DA on the same task subset can be carried forward from Exp 1 for context, but the controlled variable inside Exp 2 is only `latent_steps`.
+The controlled variable is channel budget; the second factor is channel type. `Latent-DA-0` anchors the bottom of both curves and doubles as a null control: whatever success remains at zero budget is what the receiver achieves from its own prompt alone, and every other point should be read as a delta against it.
 
 ## Pre-Registration
 
@@ -73,25 +80,28 @@ If this fails:
 - Revise the subset before running any capacity conditions.
 - Do not tune the subset after looking at capacity-specific results.
 
-### Step 2: Confirm `latent_steps` Plumbing
+### Step 2: Confirm Budget Plumbing on Both Channels
 
 Action:
 
 - Add or verify a configuration path for `latent_steps`.
 - Ensure the value reaches RecursiveMAS inference and affects the latent rollout.
-- Record the configured value in every run log.
+- Add or verify the matching text truncation path in `controls.py`, using the receiver's tokenizer so `k` means the same thing on both channels.
+- Record requested and effective values for both in every run log (`effective_latent_steps`, `text_budget_tokens`).
 
 Verification:
 
-- Run a smoke call for `latent_steps=16`, `32`, and `48`.
-- Confirm output shapes or logged rollout metadata reflect the configured step count.
-- Confirm run metadata records the requested and effective `latent_steps`.
+- Run a smoke call for `latent_steps` of 0, 16, 32, and 48.
+- Confirm the bundle's first dimension equals the configured step count, and that 0 yields the documented empty tensor rather than an exception.
+- Run a smoke call for each text budget and confirm the receiver's rendered prompt contains the expected token count.
+- Confirm run metadata records requested and effective values for both channels.
 
 Success criteria:
 
-- Each capacity setting produces a valid latent handoff.
-- Requested and effective `latent_steps` match.
+- Each capacity setting produces a valid handoff on its channel.
+- Requested and effective budgets match on both channels.
 - The backend does not silently fall back to a default value.
+- Truncation is applied to what the receiver sees, not only to what is logged.
 
 If this fails:
 
@@ -178,10 +188,11 @@ If this fails:
 
 Action:
 
-- Compute success and test pass rate by `latent_steps`.
+- Compute success and test pass rate by budget, separately for each channel.
 - Compute paired deltas where the same task-repeat differs by capacity.
+- Compute latent-minus-text deltas at each matched budget.
 - Identify tasks solved by higher capacity but not lower capacity.
-- Plot success versus `latent_steps`.
+- Plot success versus budget with one curve per channel.
 
 Verification:
 
@@ -264,13 +275,17 @@ If this fails:
 
 Capacity bottleneck success:
 
-- A visible performance difference appears across 16, 32, and 48 latent steps.
+- A visible performance difference appears across 0, 16, 32, and 48 latent steps.
 - Lower-capacity settings fail on tasks solved by higher-capacity settings.
+
+Channel-efficiency success:
+
+- The latent curve sits above the token-matched text curve at one or more budgets, with intervals that do not overlap.
 
 Operational success:
 
-- Effective `latent_steps` is logged and verified for every valid run.
-- The same tasks, graph, tools, and evaluator are used across all settings.
+- Effective budgets are logged and verified for every valid run on both channels.
+- The same tasks, graph, tools, checkpoints, and evaluator are used across all settings.
 - Efficiency cost is reported alongside task quality.
 
 Mechanism-supporting success:
@@ -281,13 +296,17 @@ Mechanism-supporting success:
 
 If performance is flat across capacity settings, report that the tested tasks do not expose a latent capacity bottleneck. Follow-up analysis should check whether the task set is too easy, the latent channel is unused, or fixed released links are the limiting factor.
 
+If `Latent-DA-0` matches the higher settings, the channel contributes nothing and the sweep is measuring noise. Report it as such and connect it to the Exp 0 Step 5b and Exp 1 shuffled-control results rather than presenting a flat curve as a capacity finding.
+
+If the latent and text curves overlap at every matched budget, report that latent packing offers no per-token advantage in this harness. This is a clean, quotable result and it does not depend on Latent-DA winning outright.
+
 If higher capacity improves quality but sharply increases GPU seconds, report the tradeoff rather than treating capacity as a free improvement.
 
 ## Deliverables
 
 - Frozen medium-task manifest.
 - Capacity sweep run logs.
-- Success versus `latent_steps` plot.
+- Success versus budget plot with **both** channel curves on one axis and `latent_steps=0` as the shared anchor.
 - Efficiency table by capacity setting.
 - Cosine trajectory plots.
 - Optional probe recovery comparison after Exp 3a.

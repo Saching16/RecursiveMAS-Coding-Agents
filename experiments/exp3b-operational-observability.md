@@ -8,11 +8,22 @@ Quantify what a human debugger or monitoring system loses when delegation moves 
 
 ## Research Question
 
-RQ5: What operational observability is lost when moving from text to latent delegation, and does probing partially compensate?
+RQ5: How much task-relevant state does a text handoff actually expose to a human debugger, and how much of the latent arm's state can probing recover?
+
+## What is and is not a finding here
+
+Under the scoring rules below, semantic state in the latent arm scores `0.0` by construction: a tensor is not human-readable, so "Text-DA is more observable than Latent-DA" is true before any data is collected. Stating it as the result of an experiment invites the reviewer objection that the whole experiment is a definition.
+
+The measurable content is two numbers:
+
+1. **The text arm's observability score.** Nobody has measured what fraction of task-relevant state a coding agent's natural-language handoff actually carries. The interesting outcome is that it is well below 1.0 — text handoffs drop state too, and quantifying that is the contribution.
+2. **The probe-recoverable fraction for the latent arm.** How much of the gap probing closes is a genuine empirical unknown.
+
+A third quantity falls out for free once `Text-DA-cap(k)` exists: how observability degrades as the text budget shrinks toward the latent arm's budget. That is the point where the two channels are comparable on both axes at once.
 
 ## Hypothesis
 
-Text-DA should have higher direct observability because handoffs are readable, loggable, diffable, and replayable. Latent-DA should have lower direct observability, but Exp 3a probes may recover some task-relevant state.
+Text-DA has higher direct observability by construction. The open questions are how far below full observability text actually sits, and how much of the latent arm's state Exp 3a probes recover.
 
 ## Directly Available Signals
 
@@ -33,6 +44,8 @@ The denominator is the union of P1-P4 label fields for that handoff:
 - Ambiguity state.
 
 A state variable counts as directly observable if it is explicitly present in the handoff text or trivially derivable with pre-registered string or regex rules over logged text.
+
+Score `text_handoff_seen_by_receiver`, not `text_handoff`. In `Text-DA-cap(k)` these differ by truncation, and in `Latent-DA` the full text may be logged for analysis while the receiver only saw a stub. Scoring a string the receiver never got would inflate the observability of an arm that did not actually communicate it.
 
 ## Scoring Categories
 
@@ -287,7 +300,8 @@ Action:
 
 - Join observability aggregates with task success from Exp 1 and Exp 2.
 - Plot x = aggregate observability score and y = task success rate.
-- Include Text-DA and Latent-DA at `latent_steps` values 16, 32, and 48 where available.
+- Include Text-DA, Text-DA-cap at each budget, and Latent-DA at `latent_steps` values 0, 16, 32, and 48 where available.
+- The capped text points are what make the plot a tradeoff curve rather than two isolated clusters: they sweep observability continuously between the latent arm's floor and the full text arm.
 
 Verification:
 
@@ -323,19 +337,21 @@ Observability-performance tradeoff:
 
 - x-axis: aggregate observability score.
 - y-axis: task success rate.
-- Points: Text-DA and Latent-DA at `latent_steps` values 16, 32, and 48.
+- Points: Text-DA (uncapped), Text-DA-cap at 16 / 32 / 48 tokens, and Latent-DA at `latent_steps` 0 / 16 / 32 / 48.
+- Two visually distinct series, one per channel, so the reader can see whether latent buys success at a given observability level that text cannot.
 
 ## Experiment-Level Success Criteria
 
 Measurement success:
 
-- Text-DA shows higher direct observability than Latent-DA.
-- Scores are reproducible from a frozen protocol.
+- The **text arm's** observability score is measured with uncertainty, per complexity tier and role transition. This is the number the experiment exists to produce.
+- Scores are reproducible from a frozen protocol, and the inter-rater pilot met its threshold.
 - Missingness and uncertainty are reported.
+- Latent direct observability is reported as `0.0` by construction and explicitly labeled as a definitional consequence rather than a measurement.
 
 Probe-compensation success:
 
-- Latent probe-recoverable fraction partially closes the gap between latent direct observability and text direct observability.
+- Latent probe-recoverable fraction is computed from held-out Exp 3a results and quantifies how much of the gap probing closes.
 
 Communication success:
 
@@ -343,9 +359,11 @@ Communication success:
 
 ## Negative Result Interpretation
 
+If the text arm's observability score is near 1.0, text handoffs preserve nearly all task-relevant state and the "text summarization compresses agent state" premise behind RQ4 is weak for coding tasks. Report it; it is a direct challenge to the proposal's own hypothesis and worth more than a confirmation.
+
 If probe recovery does not close the observability gap, report latent delegation as operationally opaque under this harness. If Latent-DA does not improve task success, the result argues against accepting the observability cost for the tested setting.
 
-If Text-DA and Latent-DA have similar observability because the latent harness logs rich text side channels, report that the implementation is no longer a clean latent-vs-text observability comparison and separate side-channel logs from the latent bundle itself.
+If Text-DA and Latent-DA have similar observability because the latent harness logs rich text side channels, report that the implementation is no longer a clean latent-vs-text observability comparison and separate side-channel logs from the latent bundle itself. Note that the `Latent+Text-DA` arm is exactly this situation by design, so it should be scored and reported separately rather than pooled with `Latent-DA`.
 
 ## Deliverables
 

@@ -18,10 +18,20 @@ Text handoff compresses agent state by dropping uncertainty about file relevance
 
 At each delegation handoff, extract matched representations:
 
-- Latent bundle: post-outer-link vectors from Latent-DA.
-- Text summary: the message Text-DA would pass to the next subagent.
+- Latent bundle: post-outer-link vectors from Latent-DA, loaded from `latent_artifact_path`.
+- Text summary: the message Text-DA passed to the next subagent, from `text_handoff`.
+
+Join on `handoff_id`, and restrict comparisons to handoffs sharing the same `binding`, `source_model`, `target_model`, and role transition. Probing across different model pairs measures the models, not the channel.
 
 Use the same label schema and matched train/validation split for latent and text probes.
+
+### The two channels are not observed in the same run
+
+Under the frozen design, `Latent-DA` stubs its `ToolMessage`, so a latent run has no natural-language summary to probe and a text run has no bundle. Latent and text representations therefore come from **different runs of the same task**, not from the same handoff. Two consequences:
+
+- Pair at the task and role-transition level, not the handoff level, and expect the two arms to have different handoff counts on the same task. Record unmatched handoffs on both sides.
+- The primary corpus is one-shot (Exp 1/2) handoffs in the worker → orchestrator direction. If Exp 4 logs exist, its orchestrator → worker feedback handoffs (`outer_s2`) are a different distribution: stratify by `outer_link_key` and treat probes on the feedback direction as exploratory, never pooled with the forward direction.
+- `Latent+Text-DA` is the one arm that produces both representations for the *same* handoff. If it runs at sufficient volume, it is the cleanest probe corpus even though it is not the headline arm. Decide in pre-registration whether the primary probe analysis uses paired `Latent+Text-DA` handoffs or unpaired `Latent-DA` versus `Text-DA` handoffs, and report which.
 
 ## Probe Targets
 
@@ -165,6 +175,8 @@ Action:
 - Load post-outer-link latent bundles.
 - Convert tensors into fixed-size feature vectors using a pre-registered pooling or flattening strategy.
 - Record shape, dtype, pooling method, and normalization.
+- Note that flattening gives `latent_steps * target_hidden` dimensions, which is tens of thousands of features against a few hundred handoffs. Mean-pooling over the step axis keeps dimensionality at `target_hidden` and is the safer default; whichever is chosen, the dimensionality-to-sample ratio needs to be stated alongside the results.
+- If Exp 2 data is included, `latent_steps` varies across runs, so a pooling strategy that is invariant to the step count is required for cross-capacity comparison.
 
 Verification:
 
@@ -245,12 +257,14 @@ Verification:
 - Confirm each probe uses only train data.
 - Save model weights, hyperparameters, and metrics.
 - Compare against simple baselines such as majority class or frequency baseline.
+- Add a shuffled-label control per property: refit on permuted labels and confirm accuracy falls to baseline. With high-dimensional features and few handoffs, a linear probe can fit noise, and this is the cheapest way to show it did not.
 
 Success criteria:
 
 - Probe training is reproducible from saved configs.
-- Each property has latent, text, and baseline results.
+- Each property has latent, text, baseline, and shuffled-label results.
 - No probe uses downstream test labels during training.
+- Feature dimensionality and sample count are reported next to every accuracy number.
 
 If this fails:
 
@@ -350,7 +364,9 @@ If latent wins on 0 or 1 property, interpretability is not a contribution. Keep 
 
 ## Dependencies
 
-- Exp 0 harness spike complete.
+- Exp 0 harness spike complete, including Step 5b. Probing a channel the receiver ignores measures what the source model encoded, not what was communicated, and the write-up must say so if Step 5b failed.
 - At least one pilot Exp 1 run complete.
-- Handoff logging infrastructure stable.
+- Handoff logging infrastructure stable, with `handoff_id` and retrievable `latent_artifact_path` on every latent record.
 - Human decision resolved for P1-P4 ground-truth label strategy.
+- Pre-registration decision on paired (`Latent+Text-DA`) versus unpaired probe corpus.
+- `scikit-learn` installed; it is not in `requirements.txt`.
