@@ -9,7 +9,8 @@
 > This file is the engineering checklist. It exists because the experiment docs
 > describe *what to measure*, not *what has to work first*.
 
-**Last verified:** 2026-08-25 · macOS 26.4 arm64 · RecursiveMAS `e822ce5`
+**Last verified:** 2026-09-21 · macOS 26.4 arm64 · RecursiveMAS `f71b00f`
+(previous snapshot 2026-08-25 / `e822ce5`; §1 disk and §11 are new)
 
 ---
 
@@ -36,10 +37,32 @@ Everything below was checked on this machine, not assumed.
 | scikit-learn | **Missing**; not in `requirements.txt` | Needed by Exp 3a probes |
 | `.venv` | **Exists**, but contains only `ipykernel` + deps | **Blocker** |
 | pip | 26.2.1 (in `.venv`) | OK |
-| Free disk | ~16 GiB of 228 GiB | **Tight** — see §2 |
+| Free disk | **~2.2 GiB** of 228 GiB (was ~16 GiB on 2026-08-25) | **Blocker** — see §1.1 |
 
 `.venv` was created since the last revision of this file but never populated from
 `requirements.txt`. Gate 0.1 is therefore still red, for a different reason than before.
+
+### 1.1 Disk has collapsed since the last snapshot — this decides Gate 0.3
+
+Free space went from ~16 GiB to **~2.2 GiB**. Binding A needs ~11 GB of checkpoints
+(§2). **Local MPS is no longer an option for Gate 0.4**, and the Gate 0.3 "compute
+target" decision is now forced rather than open: it has to be remote, or ~15 GB has to
+be freed first.
+
+Two measurement traps found while working on this machine, both worth knowing before
+trusting a `df` number:
+
+- **macOS swap is carved from the same APFS volume.** Free space swung by >1 GB during
+  model runs and recovered on process exit. Alarming `df` readings mid-run are usually
+  swap, not a runaway write.
+- **`du` over-reports reclaimable space.** `uv cache clean` freed ~200 MB against a
+  claimed 3.4 GB, because APFS copy-on-write shares blocks between the cache and
+  installed venvs. Budget from `df` deltas, not `du` totals.
+
+Also relevant to Gate 0.3: this machine has ~8 GB RAM and was observed at 113 MB
+unused with ordinary apps running. A 0.5B model running *inside* an agent graph
+thrashed and never completed; single direct model calls were fine. Interactive agent
+runs against a 3B checkpoint are not viable here regardless of disk.
 
 ### Import checks (actual results)
 
@@ -459,3 +482,67 @@ use it verbatim so Exp 3a/3b can join against it later.
 | 1 | `integrations/deepagents_latent/` (incl. both link directions) | Blocked on Gate 0 |
 | 2+ | Exp 1 / 2 / 3a / 3b | Blocked on Gate 1 |
 | 3+ | Exp 4a loop spike → 4b/4c round sweeps | Blocked on Exp 0 + pilot Exp 1 |
+
+
+---
+
+## 11. Verified API facts for Gate 1 (from a scratch prototype)
+
+A throwaway prototype of the Deep Agents side was built and discarded
+(`~/projects/latentmas-deepagents/latent-delegation`, now marked scratch). Its
+design was wrong for this repo — it assumed **same weights on both sides of the
+handoff**, which no released outer link supports (§2) — but it hit real API traps
+that `hf_chat_model.py`, `latent_middleware.py` and `latent_backend.py` will hit
+too. Recorded here so Gate 1 doesn't rediscover them.
+
+Two salvaged modules are already in `integrations/deepagents_latent/`:
+`instrumentation.py` (§8 metrics; 10 tests) and `tool_calling.py` (the
+`bind_tools` + Hermes parsing seed for `hf_chat_model.py`; 13 tests). Both pass.
+
+### Traps that apply to code we write
+
+| Trap | Detail |
+|---|---|
+| **`bind_tools` is mandatory** | `BaseChatModel.bind_tools` raises `NotImplementedError` in the base class, and `langchain/agents/factory.py:993` calls it unconditionally whenever tools are configured. `hf_chat_model.py` dies on its first model call without it. |
+| **Tool calls arrive as text** | Qwen templates render a schema block via `apply_chat_template(..., tools=[...])` and emit Hermes-style `<tool_call>{"name":…,"arguments":{…}}</tool_call>`, which must be parsed back into LangChain `ToolCall` dicts. Verified against a real Qwen2.5-0.5B-Instruct tokenizer: template output matches `tool_calling.extract_tool_calls`. |
+| **`PrivateStateAttr` silently drops keys on `.invoke()`** | It is `OmitFromSchema(input=True, output=True)`; omitting from the *input* schema means LangGraph's compiled input schema strips the key from whatever is passed to `.invoke()`, with no error. Use `OmitFromOutput` for anything the caller must be able to set. Directly relevant to §6's state-key transport if a bundle ever needs to travel **into** a subagent rather than out of one. |
+| **`DynamicCache` is not subscriptable** | transformers 5.x returns a `Cache` object, so `past[0][0].shape[-2]` raises `TypeError`. Use `past.get_seq_length()` with a tuple fallback. |
+| **`generate()` rejects explicit `cache_position`** | Passing it alongside a primed `past_key_values` raises `ValueError: model_kwargs not used by the model`. `generate()` derives it correctly from `past_key_values` + `attention_mask`. |
+| **`Cache.crop()` positive values use legacy semantics** | A **positive** argument is the cache's desired *final absolute size*, not the number of tokens to remove — so `crop(5)` leaves 5 tokens. It still produces correct text (cropping from the end keeps correct leading tokens; `generate()` just recomputes more), so an output-equality test passes while the optimization silently does nothing. Use the negative convention and **assert on cache length**, not just output. |
+
+### Traps that do *not* apply to this repo
+
+Checked and clear, so don't spend Gate 0.1 time on them: `inference_utils/` and
+`modeling.py` use neither legacy tuple-cache indexing (`past[0][0]`) nor explicit
+`cache_position`, so the two transformers-5.x cache traps above are confined to new
+code. `requirements.txt` pins `transformers==5.3.0`; 5.17.0 also works for the
+non-RecursiveMAS pieces.
+
+### Measurements that support §2.11 ("no training in v1")
+
+Measured on Qwen2.5-0.5B-Instruct, raw last-layer hidden states fed back as
+`inputs_embeds` with **no** link:
+
+- **~666×** the mean input-embedding norm (0.453 vs 301.6). The final RMSNorm plateaus
+  it rather than letting it diverge, so it is a large *constant* mismatch.
+- Nearest-embedding cosine **0.195**, against **0.130** for a random direction and
+  1.0 for a real token embedding — barely above the random floor. Over successive
+  raw-feedback steps it decays to **0.096**, *below* random.
+
+Rescaling to the mean embedding norm fixes magnitude but cannot fix direction (cosine
+is scale-invariant). This is quantitative support for using the **released trained
+links** rather than any hand-rolled projection: the distributional gap is exactly what
+the RecursiveLink residual is trained to close.
+
+Related: LatentMAS's least-squares realignment matrix
+`M = (WᵒᵘᵗᵀWᵒᵘᵗ)⁻¹WᵒᵘᵗᵀWⁱⁿ` is **exactly identity** for tied-embedding models
+(`max |M − I| = 0.0048` measured on Qwen2.5-0.5B). If a tied checkpoint is ever used
+as a baseline, that baseline is a no-op by construction.
+
+### Reproducibility warning for the cosine metrics (§3, §8)
+
+The latent rollout is chaotically sensitive: a **~1e-6** perturbation in an injected
+vector compounds to cosine **0.761 by step 3**. Latent trajectories are therefore not
+bitwise reproducible across dtype, hardware or attention kernel. Pin dtype, record
+seeds, and expect run-to-run variance beyond sampling noise when quoting
+`cos(in, out)` or probe numbers.
