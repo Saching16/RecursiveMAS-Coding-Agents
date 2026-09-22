@@ -446,26 +446,29 @@ use it verbatim so Exp 3a/3b can join against it later.
 
 ---
 
-## 9. Open decisions for you
+## 9. Decisions — RESOLVED 2026-09-21
 
-1. **Topology binding** (§2, Gate 0.2) — Binding A (mixture pair) or Binding B
-   (sequential trio). Recommendation is A. This one gates everything else, so decide it
-   first; the six experiment docs assume A until told otherwise. (Note Exp 4 depends on
-   the binding being bidirectional: A has the `outer_2s`/`outer_s2` pair, B has the
-   `outer_12`/`outer_23`/`outer_31` 3-cycle — either closes a loop, but the loop shape
-   differs and the Exp 4 doc is written for A.)
-2. **`ToolMessage` content in the latent arm** (§6) — stub or full text. Determines
-   whether the headline claim is "latent replaces text" or "latent augments text".
-3. **Compute target** for Exp 0 (Gate 0.3) — local MPS or remote GPU. Note this is
-   really two decisions: Exp 0 is one run, Exp 1+2 are a few hundred.
-4. **Week-1 evidence** — re-run and commit `smoke_results.json`, or soften the
-   "COMPLETE" claim in `PROPOSAL.md` §6 to reflect that the artifact is not in-repo.
-   `PROPOSAL.md` §6 has been downgraded to "provisional" pending this.
-5. **Golden task source** — hand-written fixture, a trimmed real repo, or an MBPP+
-   multi-file variant. MBPP+ ships single-function problems, so "multi-file" needs
-   construction either way.
-6. **Disk** — ~16 GiB free against ~11 GB for Binding A leaves no room for a third role
-   model or a second binding. Free space or go remote before Gate 0.4.
+All six are closed. Experiment docs that contradict these are stale and should be
+propagated to, not followed.
+
+| # | Decision | Resolution |
+|---|---|---|
+| 1 | **Topology binding** (§2, Gate 0.2) | **Binding A** — mixture pair. Orchestrator = Summarizer `Qwen3.5-2B`, worker = Code expert `Qwen2.5-Coder-3B`, joined by `outer_2s` / `outer_s2`. Binding B is not being built. |
+| 2 | **`ToolMessage` in the latent arm** (§6) | **Stub.** Three arms as specced: `Text-DA` / `Latent-DA` (stub, headline) / `Latent+Text-DA` (secondary). Headline claim stays "latent replaces text". |
+| 3 | **Compute target** (Gate 0.3) | **Remote.** Forced, not chosen — see §1.1. |
+| 4 | **Week-1 evidence** | **Soften `PROPOSAL.md` §6** to "run on Colab, artifact not archived." Do not re-run the old probe; Gate 0.4 supersedes it by loading the receiver the Week-1 run never loaded. |
+| 5 | **Golden task source** (Gate 0.5) | **Hand-written fixture.** Chosen so specific facts can be planted and checked for transit — Exp 3a asks *what* crosses the boundary, which a borrowed repo doesn't let you control. |
+| 6 | **Disk** | **Free space regardless of #3.** Local room is still needed for venvs even with remote compute. ~7.6 GB sits in package caches (Homebrew 2.3G, pip 1.6G, ms-playwright 1.3G) plus ~5 GB in stale app updaters. |
+
+Consequences worth carrying forward:
+
+- **Binding A's links are task-agnostic, not code-trained.** Expect "your links were
+  never trained for code" in review. Binding B is the answer if it lands, but as a
+  post-hoc robustness check, not a second main line.
+- **A genuine stub means `Latent-DA` will not degrade gracefully.** The orchestrator
+  receives almost nothing in text, so a weak channel shows up as a crater, not a dip.
+  That is the test working correctly. It also promotes the **token-capped text arm**
+  from nice-to-have to the informative middle ground between the two extremes.
 
 ---
 
@@ -473,12 +476,13 @@ use it verbatim so Exp 3a/3b can join against it later.
 
 | Gate | Item | Status |
 |---|---|---|
-| 0.1 | Isolated env, imports pass | **Failing** — `.venv` exists but is empty of project deps |
-| 0.2 | Topology bound to a released link set | Not started — **new blocker**, see §2 |
-| 0.3 | Compute target chosen | Not started |
-| 0.4 | Smoke reproduced with receiver + artifact committed | Not started (claimed done, artifact missing, receiver never loaded) |
-| 0.5 | Golden task frozen | Not started |
-| — | Design decisions frozen (§6) | Drafted, needs sign-off |
+| 0.1 | Isolated env, imports pass | **Failing** — `.venv` exists but is empty of project deps. Blocked on remote box (§9 #3) |
+| 0.2 | Topology bound to a released link set | **Done** — Binding A (§9 #1) |
+| 0.3 | Compute target chosen | **Done** — remote, forced by §1.1 (§9 #3). Provisioning not started |
+| 0.4 | Smoke reproduced with receiver + artifact committed | Not started (claimed done, artifact missing, receiver never loaded). Next after 0.1 |
+| 0.5 | Golden task frozen | Not started — hand-written fixture (§9 #5). **Buildable now, needs no GPU** |
+| — | Design decisions frozen (§6, §9) | **Signed off 2026-09-21** |
+| — | Salvaged `instrumentation.py` + `tool_calling.py` | **Landed**, 23 tests passing (§11) |
 | 1 | `integrations/deepagents_latent/` (incl. both link directions) | Blocked on Gate 0 |
 | 2+ | Exp 1 / 2 / 3a / 3b | Blocked on Gate 1 |
 | 3+ | Exp 4a loop spike → 4b/4c round sweeps | Blocked on Exp 0 + pilot Exp 1 |
