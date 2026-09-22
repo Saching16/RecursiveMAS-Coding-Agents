@@ -64,6 +64,30 @@ unused with ordinary apps running. A 0.5B model running *inside* an agent graph
 thrashed and never completed; single direct model calls were fine. Interactive agent
 runs against a 3B checkpoint are not viable here regardless of disk.
 
+### 1.2 Compute target is AMD/ROCm — what that changes
+
+Gate 0.3 resolves to remote AMD GPUs (AMD Developer Group access). Mostly good
+news, but four things to get right at Gate 0.1:
+
+- **`requirements.txt` will install the wrong torch.** `pip install -r
+  requirements.txt` resolves `torch==2.9.0` to the default PyPI wheel (CUDA/CPU),
+  which has no ROCm support. Install torch from the ROCm index *first*
+  (`--index-url https://download.pytorch.org/whl/rocm<version>`), then install the
+  rest with torch already satisfied. Do not edit the pin to paper over this.
+- **Device strings do not change.** PyTorch's ROCm build keeps the `cuda`
+  namespace — `torch.device("cuda")` and `torch.cuda.is_available()` both work via
+  HIP. Code in `inference_utils/` that says `cuda` needs no edit.
+- **`release_resources`'s cache-emptying actually works here.** §4 flags that it
+  only empties the CUDA cache, which frees nothing on MPS. On ROCm
+  `torch.cuda.empty_cache()` maps to HIP, so that rough edge disappears — one
+  fewer reason to avoid reloading models.
+- **Attention kernels and quantization libs are the real risk.** `flash-attn`,
+  `xformers`, and `bitsandbytes` are CUDA-first and either absent or fork-only on
+  ROCm. If any load path requests `attn_implementation="flash_attention_2"`, fall
+  back to `"sdpa"` or `"eager"` and record which, since the attention
+  implementation changes numerics — and per §11 the latent rollout is chaotically
+  sensitive, so both arms must use the same one.
+
 ### Import checks (actual results)
 
 ```text
@@ -455,7 +479,7 @@ propagated to, not followed.
 |---|---|---|
 | 1 | **Topology binding** (§2, Gate 0.2) | **Binding A** — mixture pair. Orchestrator = Summarizer `Qwen3.5-2B`, worker = Code expert `Qwen2.5-Coder-3B`, joined by `outer_2s` / `outer_s2`. Binding B is not being built. |
 | 2 | **`ToolMessage` in the latent arm** (§6) | **Stub.** Three arms as specced: `Text-DA` / `Latent-DA` (stub, headline) / `Latent+Text-DA` (secondary). Headline claim stays "latent replaces text". |
-| 3 | **Compute target** (Gate 0.3) | **Remote.** Forced, not chosen — see §1.1. |
+| 3 | **Compute target** (Gate 0.3) | **Remote AMD/ROCm** (AMD Developer Group). Forced off local by §1.1; ROCm consequences in §1.2. |
 | 4 | **Week-1 evidence** | **Soften `PROPOSAL.md` §6** to "run on Colab, artifact not archived." Do not re-run the old probe; Gate 0.4 supersedes it by loading the receiver the Week-1 run never loaded. |
 | 5 | **Golden task source** (Gate 0.5) | **Hand-written fixture.** Chosen so specific facts can be planted and checked for transit — Exp 3a asks *what* crosses the boundary, which a borrowed repo doesn't let you control. |
 | 6 | **Disk** | **Free space regardless of #3.** Local room is still needed for venvs even with remote compute. ~7.6 GB sits in package caches (Homebrew 2.3G, pip 1.6G, ms-playwright 1.3G) plus ~5 GB in stale app updaters. |
@@ -478,9 +502,9 @@ Consequences worth carrying forward:
 |---|---|---|
 | 0.1 | Isolated env, imports pass | **Failing** — `.venv` exists but is empty of project deps. Blocked on remote box (§9 #3) |
 | 0.2 | Topology bound to a released link set | **Done** — Binding A (§9 #1) |
-| 0.3 | Compute target chosen | **Done** — remote, forced by §1.1 (§9 #3). Provisioning not started |
+| 0.3 | Compute target chosen | **Done** — remote AMD/ROCm (§9 #3, §1.2). Provisioning in progress |
 | 0.4 | Smoke reproduced with receiver + artifact committed | Not started (claimed done, artifact missing, receiver never loaded). Next after 0.1 |
-| 0.5 | Golden task frozen | Not started — hand-written fixture (§9 #5). **Buildable now, needs no GPU** |
+| 0.5 | Golden task frozen | **Done 2026-09-21** — `integrations/deepagents_latent/tasks/golden/`, 50 verifier checks green |
 | — | Design decisions frozen (§6, §9) | **Signed off 2026-09-21** |
 | — | Salvaged `instrumentation.py` + `tool_calling.py` | **Landed**, 23 tests passing (§11) |
 | 1 | `integrations/deepagents_latent/` (incl. both link directions) | Blocked on Gate 0 |

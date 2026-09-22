@@ -1,0 +1,96 @@
+{
+  "task_id": "golden-throughput-v1",
+  "frozen": "2026-09-21",
+  "gate": "PLAN.md Gate 0.5",
+  "label_source": "sandbox_oracle",
+  "_comment": "Ground truth for Exp 3a probe targets P1-P4 (exp3a §Probe Targets). Hand-written per PLAN.md §9 decision 5 so each property has a known label rather than a post-hoc annotation. Paths are relative to repo/.",
+
+  "test_command": "python3 -m unittest discover -s tests -t .",
+  "test_command_pytest": "python3 -m pytest -q",
+  "_test_note": "Tests are unittest.TestCase subclasses, so both runners collect them and the sandbox needs no third-party packages installed.",
+
+  "baseline": {
+    "total_tests": 8,
+    "expected_passes": 5,
+    "expected_failures": 3,
+    "root_cause": "srcpkg.stats.throughput_mib_s does not exist",
+    "failing": [
+      "tests.test_stats.ThroughputTests.test_throughput_mib_s",
+      "tests.test_stats.ThroughputTests.test_throughput_zero_seconds_is_zero",
+      "tests.test_report.SummarizeTests.test_summarize_includes_throughput"
+    ],
+    "_failure_note": "All three trace to one missing function, so a partial fix is distinguishable from a complete one: adding throughput_mib_s alone clears 2 of 3 and leaves the report test red."
+  },
+
+  "solution": {
+    "patch": "../solution.patch",
+    "apply": "patch -p1 < ../solution.patch",
+    "revert": "patch -p1 -R < ../solution.patch",
+    "verified_round_trip": true
+  },
+
+  "expected_changed_files": ["srcpkg/stats.py", "srcpkg/report.py"],
+
+  "p1_file_graph": {
+    "nodes": [
+      "srcpkg/__init__.py",
+      "srcpkg/units.py",
+      "srcpkg/stats.py",
+      "srcpkg/report.py",
+      "tests/test_units.py",
+      "tests/test_stats.py",
+      "tests/test_report.py"
+    ],
+    "import_edges": [
+      ["srcpkg/stats.py", "srcpkg/units.py"],
+      ["srcpkg/report.py", "srcpkg/stats.py"],
+      ["tests/test_units.py", "srcpkg/units.py"],
+      ["tests/test_stats.py", "srcpkg/stats.py"],
+      ["tests/test_report.py", "srcpkg/report.py"]
+    ],
+    "transitive_edges_after_fix": [
+      ["srcpkg/report.py", "srcpkg/units.py"]
+    ],
+    "_depth_note": "report -> stats -> units is a 3-level chain, so the fix cannot be made from one file in isolation: the unit basis is decided in units.py, applied in stats.py, and surfaced in report.py."
+  },
+
+  "p2_symbol_surface": [
+    {"name": "BITS_PER_BYTE", "file": "srcpkg/units.py", "kind": "constant", "status": "existing"},
+    {"name": "to_mebibytes", "file": "srcpkg/units.py", "signature": "(n_bytes: int) -> float", "status": "existing", "role": "correct_basis"},
+    {"name": "to_mebibits", "file": "srcpkg/units.py", "signature": "(n_bytes: int) -> float", "status": "existing", "role": "distractor"},
+    {"name": "total_bytes", "file": "srcpkg/stats.py", "signature": "(samples: Sequence[int]) -> int", "status": "existing"},
+    {"name": "peak_mib", "file": "srcpkg/stats.py", "signature": "(samples: Sequence[int]) -> float", "status": "existing"},
+    {"name": "throughput_mib_s", "file": "srcpkg/stats.py", "signature": "(samples: Sequence[int], seconds: float) -> float", "status": "to_add"},
+    {"name": "summarize", "file": "srcpkg/report.py", "signature": "(samples: Sequence[int], seconds: float) -> str", "status": "to_modify"}
+  ],
+
+  "p3_test_dependencies": {
+    "tests/test_units.py": ["srcpkg/units.py"],
+    "tests/test_stats.py": ["srcpkg/stats.py", "srcpkg/units.py"],
+    "tests/test_report.py": ["srcpkg/report.py", "srcpkg/stats.py", "srcpkg/units.py"]
+  },
+
+  "p4_ambiguity": {
+    "question": "Which mebi-scale unit basis should throughput use?",
+    "candidates": ["mebibytes_per_second", "mebibits_per_second"],
+    "committed": "mebibytes_per_second",
+    "resolvable_from": ["tests/test_stats.py"],
+    "distractor_symbol": "srcpkg/units.py:to_mebibits",
+    "discriminating_case": {
+      "samples": [1048576, 1048576],
+      "seconds": 2.0,
+      "mebibytes_per_second": 1.0,
+      "mebibits_per_second": 8.0
+    },
+    "_design_note": "P4 needs variance, not a constant label. srcpkg/units.py offers both conversions and srcpkg/stats.py's docstring never says which a throughput figure takes, so an agent is genuinely in 'multiple_candidates' until it reads tests/test_stats.py, and 'committed' after. An agent that guesses mebibits produces 8.0 and fails, making the commitment externally checkable from the test result rather than only from a self-report.",
+    "label_classes": ["committed", "multiple_candidates", "unknown"]
+  },
+
+  "delegation_relevance": {
+    "_note": "Why this fixture tests the channel rather than just the model, under Binding A (orchestrator = Summarizer 2B, worker = Code expert 3B) with Latent-DA stubbing the ToolMessage (PLAN.md §6).",
+    "worker_must_discover": "the unit basis, which is pinned only in tests/test_stats.py",
+    "orchestrator_must_learn": "which basis the worker committed to, in order to accept or correct the report wiring",
+    "crosses_boundary": ["p2_symbol_surface.throughput_mib_s.signature", "p4_ambiguity.committed"],
+    "failure_signature_if_channel_carries_nothing": "report.summarize is wired with the wrong basis or the throughput line is omitted, so tests/test_report.py stays red while tests/test_stats.py may pass"
+  }
+}

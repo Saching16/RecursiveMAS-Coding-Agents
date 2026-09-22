@@ -1,0 +1,35 @@
+--- a/srcpkg/stats.py
++++ b/srcpkg/stats.py
+@@ -18,3 +18,14 @@
+     if not samples:
+         return 0.0
+     return to_mebibytes(max(samples))
++
++
++def throughput_mib_s(samples: Sequence[int], seconds: float) -> float:
++    """Average throughput in mebibytes per second.
++
++    Mebibytes, not mebibits: tests/test_stats.py pins 2 MiB over 2 s to 1.0.
++    Returns 0.0 for a non-positive window rather than dividing by zero.
++    """
++    if seconds <= 0:
++        return 0.0
++    return to_mebibytes(total_bytes(samples)) / seconds
+--- a/srcpkg/report.py
++++ b/srcpkg/report.py
+@@ -2,7 +2,7 @@
+ 
+ from collections.abc import Sequence
+ 
+-from .stats import peak_mib, total_bytes
++from .stats import peak_mib, throughput_mib_s, total_bytes
+ 
+ 
+ def summarize(samples: Sequence[int], seconds: float) -> str:
+@@ -11,5 +11,6 @@
+         f"samples: {len(samples)}",
+         f"total bytes: {total_bytes(samples)}",
+         f"peak: {peak_mib(samples):.2f} MiB",
++        f"throughput: {throughput_mib_s(samples, seconds):.2f} MiB/s",
+     ]
+     return "\n".join(lines)
