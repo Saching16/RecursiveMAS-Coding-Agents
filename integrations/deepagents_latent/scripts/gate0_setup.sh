@@ -1,40 +1,58 @@
 #!/usr/bin/env bash
 #
-# Gate 0.1 — isolated environment on AMD/ROCm (PLAN.md §5.0.1, §1.2).
+# Gate 0.1 — isolated environment on a GPU box (PLAN.md §5.0.1, §1.2).
 #
 # Gate 0.1 is "done" when both import checks below print ok AND the exact
 # versions are written into a run note. This script does both, then probes the
-# things §1.2 says will bite on ROCm.
+# things that differ between vendors.
 #
-# The load-bearing step is ordering: requirements.txt pins `torch==2.9.0`,
-# which resolves to the default PyPI wheel with no ROCm support. Installing the
-# ROCm build FIRST satisfies that pin (PEP 440 `==2.9.0` matches the local
-# version `2.9.0+rocm*`), so the later `-r requirements.txt` leaves it alone.
-# That is an assumption about pip's resolver, not a guarantee, so the script
-# re-checks afterwards and fails loudly if torch got swapped for a CUDA wheel —
-# a silent swap would produce a CPU-only run that looks like it worked.
+# One script, two backends, because the procedure is identical apart from how
+# torch is installed — separate files would just let the import checks and the
+# run-note format drift apart.
+#
+#   ROCm: requirements.txt pins `torch==2.9.0`, which resolves to the default
+#         PyPI wheel with no ROCm support. The ROCm build must be installed
+#         FIRST so it satisfies that pin (PEP 440 `==2.9.0` matches the local
+#         version `2.9.0+rocm*`).
+#   CUDA: the default PyPI wheel is already CUDA-enabled on Linux, so ordering
+#         does not matter — but that wheel is built against one CUDA runtime, so
+#         a box with an older driver still needs `--cuda` to pick a matching
+#         index.
+#
+# Either way the script re-checks torch after EVERY install step and fails
+# loudly if the backend changed. A silent swap to a CPU wheel would produce a
+# run that looks like it worked while quietly invalidating every measurement —
+# the worst failure mode available here.
 #
 # Never "fixes" a resolver conflict by editing requirements.txt (PLAN §5.0.1).
 #
 # Usage:
-#   ./gate0_setup_rocm.sh [--force] [--rocm 6.4] [--python python3.12]
+#   ./gate0_setup.sh [--backend auto|cuda|rocm] [--force]
+#                    [--rocm 6.4] [--cuda cu124] [--python python3.12]
 #
+#   --backend  which accelerator to set up; default: autodetect
 #   --force    recreate .venv if it already exists (destructive to the venv only)
-#   --rocm     ROCm minor series for the wheel index; default: autodetect
+#   --rocm     ROCm minor series for the wheel index (ROCm only)
+#   --cuda     CUDA wheel tag, e.g. cu121/cu124/cu128 (CUDA only; omit to use
+#              the default PyPI wheel, which is correct on most modern boxes)
 #   --python   interpreter to build the venv from; default: autodetect >=3.11,<4.0
 
 set -euo pipefail
 
+BACKEND="auto"
 FORCE=0
 ROCM_VER=""
+CUDA_TAG=""
 PYTHON_BIN=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --backend) BACKEND="${2:?--backend needs auto|cuda|rocm}"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --rocm) ROCM_VER="${2:?--rocm needs a value, e.g. 6.4}"; shift 2 ;;
+    --cuda) CUDA_TAG="${2:?--cuda needs a value, e.g. cu124}"; shift 2 ;;
     --python) PYTHON_BIN="${2:?--python needs a value}"; shift 2 ;;
-    -h|--help) sed -n '3,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '3,38p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -61,7 +79,8 @@ ok "repo root: $REPO_ROOT"
 
 if [[ ! -d "$DEEPAGENTS_PKG" ]]; then
   die "Deep Agents package not found at $DEEPAGENTS_PKG
-     PLAN §1 expects the clone symlinked at ../deepagents. Clone or symlink it, then re-run."
+     PLAN §1 expects the clone symlinked at ../deepagents. On a fresh pod:
+       git clone https://github.com/langchain-ai/deepagents \"\$(dirname \"$REPO_ROOT\")/deepagents\""
 fi
 ok "deepagents package: $DEEPAGENTS_PKG"
 
@@ -78,34 +97,67 @@ fi
 [[ -n "$PYTHON_BIN" ]] || die "no python >=3.11,<4.0 found; pass --python explicitly"
 ok "python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 
-# ------------------------------------------------------------------- ROCm
-say "ROCm detection"
+# ------------------------------------------------------- backend detection
+say "Backend detection"
 
-if command -v rocminfo >/dev/null 2>&1; then
-  GPU_NAMES="$(rocminfo 2>/dev/null | awk -F: '/Marketing Name/ {gsub(/^ +/,"",$2); print $2}' | sort -u | grep -v -i 'cpu' | paste -sd'; ' - || true)"
-  [[ -n "$GPU_NAMES" ]] && ok "GPUs: $GPU_NAMES" || warn "rocminfo ran but reported no GPU marketing names"
-else
-  warn "rocminfo not on PATH — cannot confirm a GPU is visible"
-  GPU_NAMES="unknown"
+if [[ "$BACKEND" == "auto" ]]; then
+  if command -v rocminfo >/dev/null 2>&1 || command -v hipconfig >/dev/null 2>&1; then
+    BACKEND="rocm"
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    BACKEND="cuda"
+  else
+    die "could not detect a GPU backend (no rocminfo/hipconfig, no nvidia-smi)
+     Pass --backend cuda or --backend rocm explicitly if you know better."
+  fi
+  ok "autodetected: $BACKEND"
 fi
 
-if [[ -z "$ROCM_VER" ]]; then
-  if command -v hipconfig >/dev/null 2>&1; then
-    ROCM_FULL="$(hipconfig --version 2>/dev/null || true)"
-    ROCM_VER="$(printf '%s' "$ROCM_FULL" | cut -d. -f1,2)"
+case "$BACKEND" in
+  cuda|rocm) ;;
+  *) die "--backend must be auto, cuda or rocm; got: $BACKEND" ;;
+esac
+
+GPU_NAMES="unknown"
+if [[ "$BACKEND" == "rocm" ]]; then
+  if command -v rocminfo >/dev/null 2>&1; then
+    GPU_NAMES="$(rocminfo 2>/dev/null | awk -F: '/Marketing Name/ {gsub(/^ +/,"",$2); print $2}' | sort -u | grep -v -i 'cpu' | paste -sd'; ' - || true)"
+    [[ -n "$GPU_NAMES" ]] && ok "GPUs: $GPU_NAMES" || warn "rocminfo ran but reported no GPU names"
+  else
+    warn "rocminfo not on PATH — cannot confirm a GPU is visible"
+  fi
+  if [[ -z "$ROCM_VER" ]] && command -v hipconfig >/dev/null 2>&1; then
+    ROCM_VER="$(hipconfig --version 2>/dev/null | cut -d. -f1,2 || true)"
+  fi
+  if [[ -z "$ROCM_VER" ]]; then
+    warn "could not autodetect ROCm; defaulting the wheel index to rocm6.4"
+    warn "if that is wrong, re-run with --rocm <major.minor>"
+    ROCM_VER="6.4"
+  fi
+  # Only digits and one dot — this goes into a URL.
+  [[ "$ROCM_VER" =~ ^[0-9]+\.[0-9]+$ ]] || die "--rocm must look like 6.4, got: $ROCM_VER"
+  TORCH_INDEX="https://download.pytorch.org/whl/rocm${ROCM_VER}"
+  ACCEL_DESC="ROCm $ROCM_VER"
+  ok "torch index: $TORCH_INDEX"
+else
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    GPU_NAMES="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort -u | paste -sd'; ' - || true)"
+    DRIVER="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
+    [[ -n "$GPU_NAMES" ]] && ok "GPUs: $GPU_NAMES (driver ${DRIVER:-unknown})" || warn "nvidia-smi ran but reported no GPUs"
+  else
+    warn "nvidia-smi not on PATH — cannot confirm a GPU is visible"
+  fi
+  if [[ -n "$CUDA_TAG" ]]; then
+    # Only a cuNNN tag — this goes into a URL.
+    [[ "$CUDA_TAG" =~ ^cu[0-9]+$ ]] || die "--cuda must look like cu124, got: $CUDA_TAG"
+    TORCH_INDEX="https://download.pytorch.org/whl/${CUDA_TAG}"
+    ACCEL_DESC="CUDA (wheel tag $CUDA_TAG)"
+    ok "torch index: $TORCH_INDEX"
+  else
+    TORCH_INDEX=""
+    ACCEL_DESC="CUDA (default PyPI wheel)"
+    ok "using the default PyPI torch wheel (CUDA-enabled on Linux)"
   fi
 fi
-
-if [[ -z "$ROCM_VER" ]]; then
-  warn "could not autodetect ROCm; defaulting the wheel index to rocm6.4"
-  warn "if that is wrong, re-run with --rocm <major.minor>"
-  ROCM_VER="6.4"
-fi
-# Only digits and one dot — this goes into a URL.
-[[ "$ROCM_VER" =~ ^[0-9]+\.[0-9]+$ ]] || die "--rocm must look like 6.4, got: $ROCM_VER"
-TORCH_INDEX="https://download.pytorch.org/whl/rocm${ROCM_VER}"
-ok "ROCm series: $ROCM_VER"
-ok "torch index: $TORCH_INDEX"
 
 # ------------------------------------------------------------------- venv
 say "Virtual environment"
@@ -115,7 +167,7 @@ if [[ -d "$VENV" ]]; then
     rm -rf "$VENV"; ok "removed existing .venv (--force)"
   else
     die ".venv already exists at $VENV
-     PLAN §1 notes the existing one holds only ipykernel. Re-run with --force to recreate it."
+     Re-run with --force to recreate it."
   fi
 fi
 
@@ -125,53 +177,73 @@ PY="$VENV/bin/python"
 "$PIP" install --quiet --upgrade pip
 ok "created $VENV (pip $("$PIP" --version | awk '{print $2}'))"
 
-# ------------------------------------------------- torch FIRST, from ROCm
-say "torch (ROCm build, installed before anything else)"
+# ----------------------------------------------------- torch, backend-aware
+say "torch ($ACCEL_DESC)"
 
 TORCH_PIN="$(grep -E '^torch==' "$REPO_ROOT/requirements.txt" | head -1 || true)"
 [[ -n "$TORCH_PIN" ]] || die "requirements.txt has no torch== pin; this script assumes one"
 ok "pin from requirements.txt: $TORCH_PIN"
 
-if ! "$PIP" install --index-url "$TORCH_INDEX" "$TORCH_PIN"; then
-  die "ROCm wheel for $TORCH_PIN not available at $TORCH_INDEX
-     Check which torch versions that index carries and either pick a different
-     --rocm series or raise the pin in requirements.txt as a deliberate,
-     committed change — do not silently install a non-ROCm wheel."
+if [[ -n "$TORCH_INDEX" ]]; then
+  INSTALL_OK=0
+  "$PIP" install --index-url "$TORCH_INDEX" "$TORCH_PIN" && INSTALL_OK=1 || true
+else
+  INSTALL_OK=0
+  "$PIP" install "$TORCH_PIN" && INSTALL_OK=1 || true
 fi
 
-assert_rocm_torch() {
+if [[ "$INSTALL_OK" != "1" ]]; then
+  if [[ "$BACKEND" == "rocm" ]]; then
+    die "no ROCm wheel for $TORCH_PIN at $TORCH_INDEX
+     Pick a different --rocm series, or raise the pin in requirements.txt as a
+     deliberate committed change — do not silently install a non-ROCm wheel."
+  else
+    die "could not install $TORCH_PIN
+     If the box has an older driver, retry with an explicit wheel tag, e.g.
+       --cuda cu121"
+  fi
+fi
+
+assert_backend() {
   local phase="$1"
-  "$PY" - "$phase" <<'PY' || die "torch is not a ROCm build"
+  "$PY" - "$BACKEND" "$phase" <<'PY' || die "torch is not built for the expected backend"
 import sys, torch
-phase = sys.argv[1]
+backend, phase = sys.argv[1], sys.argv[2]
 hip = getattr(torch.version, "hip", None)
 cuda = getattr(torch.version, "cuda", None)
 print(f"   torch {torch.__version__}  hip={hip}  cuda={cuda}  ({phase})")
-if not hip:
-    print(f"\n   torch has no HIP runtime — this is a CPU/CUDA wheel, not ROCm ({phase}).", file=sys.stderr)
+if backend == "rocm" and not hip:
+    print(f"\n   torch has no HIP runtime — CPU/CUDA wheel, not ROCm ({phase}).", file=sys.stderr)
     raise SystemExit(1)
+if backend == "cuda":
+    if hip:
+        print(f"\n   torch is a ROCm build but --backend cuda was requested ({phase}).", file=sys.stderr)
+        raise SystemExit(1)
+    if not cuda:
+        print(f"\n   torch has no CUDA runtime — CPU-only wheel ({phase}).", file=sys.stderr)
+        raise SystemExit(1)
 PY
 }
 
-assert_rocm_torch "after torch install"
-ok "torch is a ROCm build"
+assert_backend "after torch install"
+ok "torch matches the requested backend"
 
 # ------------------------------------------------------- rest of the deps
 say "Remaining requirements"
 
 "$PIP" install -r "$REPO_ROOT/requirements.txt"
 
-# The whole point of the ordering above. If pip replaced torch here, every
-# later run would silently fall back to CPU and still look like it worked.
-assert_rocm_torch "after requirements.txt"
-ok "torch survived requirements.txt as a ROCm build"
+# The reason torch goes first on ROCm. If pip replaced it here, every later run
+# would silently fall back to CPU and still look like it worked.
+assert_backend "after requirements.txt"
+ok "torch survived requirements.txt"
 
 say "Deep Agents (editable) + Exp 3a dependency"
 "$PIP" install -e "$DEEPAGENTS_PKG"
 # scikit-learn is needed by the Exp 3a probes and is absent from requirements.txt (PLAN §1).
 "$PIP" install scikit-learn
-assert_rocm_torch "after deepagents"
-ok "deepagents + scikit-learn installed, torch still ROCm"
+assert_backend "after deepagents"
+ok "deepagents + scikit-learn installed, torch backend intact"
 
 # --------------------------------------------------- Gate 0.1 import checks
 say "Gate 0.1 import checks (PLAN §5.0.1)"
@@ -186,13 +258,14 @@ ok "import modeling; import deepagents"
 ok "autoregressive_latent_rollout, run_outer_adapter"
 
 # ----------------------------------------------------- device + attention
-say "Device and attention probes (§1.2)"
+say "Device and attention probes"
 
 "$PY" <<'PY'
 import torch, transformers
 print(f"   transformers {transformers.__version__}")
 avail = torch.cuda.is_available()
-print(f"   torch.cuda.is_available() = {avail}   (True here means HIP, not CUDA)")
+hip = getattr(torch.version, "hip", None)
+print(f"   torch.cuda.is_available() = {avail}" + ("   (HIP, not CUDA)" if hip else ""))
 if avail:
     for i in range(torch.cuda.device_count()):
         p = torch.cuda.get_device_properties(i)
@@ -201,11 +274,12 @@ if avail:
     _ = (x @ x).float().sum().item()
     print("   bf16 matmul on device: ok")
 else:
-    print("   WARN no device visible — everything below would run on CPU")
+    print("   WARN no device visible — everything would run on CPU")
 
-# §1.2: flash-attn is CUDA-first. Record which implementation is actually
-# usable; both arms must then use the SAME one, because PLAN §11 found the
-# latent rollout is chaotically sensitive to numerics.
+# The attention implementation changes numerics, and PLAN §11 found the latent
+# rollout compounds a ~1e-6 perturbation to cosine 0.761 by step 3. Whatever is
+# chosen here must be identical in BOTH arms. Not installed automatically:
+# flash-attn often needs a long source build, and sdpa is a fine substitute.
 try:
     from transformers.utils import is_flash_attn_2_available
     fa2 = bool(is_flash_attn_2_available())
@@ -224,15 +298,15 @@ mkdir -p "$RUNS_DIR"
 {
   echo "# Gate 0.1 run note — $STAMP"
   echo
-  echo "Generated by \`integrations/deepagents_latent/scripts/gate0_setup_rocm.sh\`."
+  echo "Generated by \`integrations/deepagents_latent/scripts/gate0_setup.sh\`."
   echo "Satisfies PLAN.md §5.0.1 (\"the exact versions are written into a run note\")."
   echo
   echo "## Host"
   echo
   echo "- uname: \`$(uname -srm)\`"
+  echo "- backend: $ACCEL_DESC"
   echo "- GPUs: $GPU_NAMES"
-  echo "- ROCm series used for the wheel index: $ROCM_VER"
-  echo "- torch index: $TORCH_INDEX"
+  echo "- torch index: ${TORCH_INDEX:-default PyPI}"
   echo "- interpreter: \`$PYTHON_BIN\` ($("$PYTHON_BIN" --version 2>&1))"
   echo
   echo "## Repo state"
@@ -251,6 +325,7 @@ try:
 except Exception:
     fa2 = False
 print(f"torch.version.hip      = {getattr(torch.version,'hip',None)}")
+print(f"torch.version.cuda     = {getattr(torch.version,'cuda',None)}")
 print(f"torch.cuda.is_available= {torch.cuda.is_available()}")
 print(f"device_count           = {torch.cuda.device_count() if torch.cuda.is_available() else 0}")
 print(f"flash_attention_2      = {fa2}")
@@ -280,7 +355,7 @@ cat <<EOF
          RecursiveMAS/Mixture-Outerlinks
        Use snapshot_repo per repo. Do NOT call resolve_mas_paths or
        load_mas_system: they pull every repo in the mixture spec (~27 GB,
-       including the 7B science model you do not need).
+       including a 7B science model you do not need).
     3. Record the attn_implementation above and use the same one in both arms.
 
   Fixture check (no GPU needed, cheap sanity that the box is sane):
