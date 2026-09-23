@@ -9,12 +9,18 @@
 > This file is the engineering checklist. It exists because the experiment docs
 > describe *what to measure*, not *what has to work first*.
 
-**Last verified:** 2026-09-21 · macOS 26.4 arm64 · RecursiveMAS `f71b00f`
-(previous snapshot 2026-08-25 / `e822ce5`; §1 disk and §11 are new)
+**Last verified:** 2026-09-23 · RunPod RTX 4090 (EU-RO-1) · RecursiveMAS `4958be6`
+on `deepagents-latent-integration`. Gate 0.1 GREEN; see §1.2 for the live
+environment and §1 for the superseded local-Mac snapshot.
 
 ---
 
 ## 1. Verified environment snapshot
+
+> **The table below describes the LOCAL DEV MAC, not the compute target.** It is
+> kept because it explains why Gate 0.3 went remote (§1.1). The environment the
+> project actually runs on is the RunPod box in **§1.2**, where Gate 0.1 is
+> **GREEN**. Do not read the "Blocker" rows below as open work.
 
 Everything below was checked on this machine, not assumed.
 
@@ -64,31 +70,96 @@ unused with ordinary apps running. A 0.5B model running *inside* an agent graph
 thrashed and never completed; single direct model calls were fine. Interactive agent
 runs against a 3B checkpoint are not viable here regardless of disk.
 
-### 1.2 Compute target is AMD/ROCm — what that changes
+### 1.2 Compute target: RunPod RTX 4090 (NVIDIA) — Gate 0.1 GREEN 2026-09-23
 
-Gate 0.3 resolves to remote AMD GPUs (AMD Developer Group access). Mostly good
-news, but four things to get right at Gate 0.1:
+AMD Developer Cloud credits were applied for but have an unknown lead time, so
+the project did not wait on them. Compute is a RunPod pod; the ROCm notes are
+retained at the end of this section for if those credits land, since the code is
+device-agnostic and would run unmodified.
 
-- **`requirements.txt` will install the wrong torch.** `pip install -r
-  requirements.txt` resolves `torch==2.9.0` to the default PyPI wheel (CUDA/CPU),
-  which has no ROCm support. Install torch from the ROCm index *first*
-  (`--index-url https://download.pytorch.org/whl/rocm<version>`), then install the
-  rest with torch already satisfied. Do not edit the pin to paper over this.
+**Live pod:** `latent-delegation-gate0` / `xr8mzs5tq7zjm6`, RTX 4090 24 GB,
+SECURE tier **$0.74/hr**, EU-RO-1, network volume `mnfmb0n80m` at `/workspace`.
+Currently **stopped** (`EXITED`) — GPU released, resumable with `start`.
+Community-tier 4090s were $0.34/hr but had no stock.
+
+**Verified environment** (run note: `integrations/deepagents_latent/runs/gate0-20260923T002604Z.md`):
+
+| Item | Value |
+|---|---|
+| torch | 2.9.0+cu128 (`cuda=12.8`, `hip=None`) |
+| transformers | 5.3.0 |
+| Python | 3.13.8 |
+| Host driver / CUDA | 580.126.20 / 13.0 |
+| Device | RTX 4090, 23.5 GiB, bf16 matmul verified on-device |
+| **`attn_implementation`** | **`sdpa`** — flash-attn absent. Pin this in BOTH arms (§11 numerics) |
+
+The `torch==2.9.0` pin resolved to `2.9.0+cu128` on a CUDA-13.0 host driver
+without an explicit wheel tag: a newer driver runs an older runtime, so no
+`--cuda` override was needed.
+
+**Checkpoints already on the volume — 9.7 GB, do not re-download:**
+
+| Repo | Size |
+|---|---|
+| `Mixture-Code-Qwen2.5-Coder-3B` | 5.8 G |
+| `Mixture-Summarizer-Qwen3.5-2B` | 3.6 G |
+| `Mixture-Outerlinks` | 322 M |
+
+Fetched with three targeted `snapshot_repo` calls (`hf_resolver.py:11`), not
+`resolve_mas_paths` — see §2. Set `HF_HOME=/workspace/hf-cache` or they
+re-download to container disk.
+
+#### Two traps found the hard way on 2026-09-23
+
+- **Never put the venv on the network volume.** `/workspace` is MooseFS:
+  387 MB/s sequential (fine for weights — 5.8 GB landed in 15 s) but
+  metadata-bound work crawls, and `pip install --upgrade pip` had not finished
+  after several minutes. Local overlay measures **14.1 GB/s**, ~36× faster.
+  Layout that works: **code + `.venv` on local disk (`/root`), weights on
+  `/workspace`.** Code is a git clone, so losing it on terminate costs seconds.
+  `gate0_setup.sh` defaults the venv to `$REPO_ROOT/.venv`, which is a trap if
+  the repo is cloned onto the volume — clone to `/root`, or give the script a
+  `--venv-path` flag.
+- **Register SSH keys BEFORE creating the pod.** `startSsh` injects
+  `PUBLIC_KEY` at create time only. A pod created with no keys registered gets
+  `PUBLIC_KEY: "null"` permanently; registering afterwards does not reach a
+  running pod ("Keys take effect for pods created afterwards"), so it costs a
+  terminate/recreate. Also: a passphrase-protected key must be loaded into
+  `ssh-agent` from a real terminal (`ssh-add --apple-use-keychain`) — the
+  prompt cannot be satisfied non-interactively, and the symptom is a confusing
+  `Server accepts key` immediately followed by `Permission denied`.
+
+#### If the AMD credits land
+
+The code is device-agnostic; `gate0_setup.sh --backend rocm` handles it. Four
+differences:
+
+- **`requirements.txt` will install the wrong torch.** `torch==2.9.0` resolves
+  to the default PyPI wheel, which has no ROCm support. Install from the ROCm
+  index *first* so it satisfies the pin, then install the rest. Do not edit the
+  pin to paper over this.
 - **Device strings do not change.** PyTorch's ROCm build keeps the `cuda`
-  namespace — `torch.device("cuda")` and `torch.cuda.is_available()` both work via
-  HIP. Code in `inference_utils/` that says `cuda` needs no edit.
-- **`release_resources`'s cache-emptying actually works here.** §4 flags that it
-  only empties the CUDA cache, which frees nothing on MPS. On ROCm
-  `torch.cuda.empty_cache()` maps to HIP, so that rough edge disappears — one
-  fewer reason to avoid reloading models.
-- **Attention kernels and quantization libs are the real risk.** `flash-attn`,
-  `xformers`, and `bitsandbytes` are CUDA-first and either absent or fork-only on
-  ROCm. If any load path requests `attn_implementation="flash_attention_2"`, fall
-  back to `"sdpa"` or `"eager"` and record which, since the attention
-  implementation changes numerics — and per §11 the latent rollout is chaotically
-  sensitive, so both arms must use the same one.
+  namespace via HIP; `inference_utils/` needs no edit.
+- **`release_resources`'s cache-emptying works there.** §4 flags that it only
+  empties the CUDA cache, which frees nothing on MPS. On ROCm
+  `torch.cuda.empty_cache()` maps to HIP.
+- **Attention kernels are the real risk.** `flash-attn`, `xformers` and
+  `bitsandbytes` are CUDA-first. Record the fallback and keep it identical
+  across arms — on this NVIDIA box it is already `sdpa`, so switching vendors
+  mid-study would change numerics unless that is held fixed.
 
-### Import checks (actual results)
+### Import checks
+
+**On the RunPod box (§1.2): both PASS as of 2026-09-23.**
+
+```text
+import modeling; import deepagents                                      → ok
+from inference_utils.inference_mas import (
+    autoregressive_latent_rollout, run_outer_adapter)                   → ok
+```
+
+Historical, on the local Mac — the failures that made Gate 0.1 red before the
+project moved to remote compute:
 
 ```text
 import modeling
@@ -97,8 +168,6 @@ import modeling
 from inference_utils.inference_mas import autoregressive_latent_rollout
   → ModuleNotFoundError: No module named 'datasets'          (inference_mas.py:29)
 ```
-
-**Exp 0 Step 1 currently fails.** Nothing latent can be built until this is fixed.
 
 ### Repositories
 
@@ -479,7 +548,7 @@ propagated to, not followed.
 |---|---|---|
 | 1 | **Topology binding** (§2, Gate 0.2) | **Binding A** — mixture pair. Orchestrator = Summarizer `Qwen3.5-2B`, worker = Code expert `Qwen2.5-Coder-3B`, joined by `outer_2s` / `outer_s2`. Binding B is not being built. |
 | 2 | **`ToolMessage` in the latent arm** (§6) | **Stub.** Three arms as specced: `Text-DA` / `Latent-DA` (stub, headline) / `Latent+Text-DA` (secondary). Headline claim stays "latent replaces text". |
-| 3 | **Compute target** (Gate 0.3) | **Remote AMD/ROCm** (AMD Developer Group). Forced off local by §1.1; ROCm consequences in §1.2. |
+| 3 | **Compute target** (Gate 0.3) | **RunPod RTX 4090**, $0.74/hr SECURE. Forced off local by §1.1. AMD credits applied for but lead time unknown, so the project did not wait; code is device-agnostic either way (§1.2). |
 | 4 | **Week-1 evidence** | **Soften `PROPOSAL.md` §6** to "run on Colab, artifact not archived." Do not re-run the old probe; Gate 0.4 supersedes it by loading the receiver the Week-1 run never loaded. |
 | 5 | **Golden task source** (Gate 0.5) | **Hand-written fixture.** Chosen so specific facts can be planted and checked for transit — Exp 3a asks *what* crosses the boundary, which a borrowed repo doesn't let you control. |
 | 6 | **Disk** | **Free space regardless of #3.** Local room is still needed for venvs even with remote compute. ~7.6 GB sits in package caches (Homebrew 2.3G, pip 1.6G, ms-playwright 1.3G) plus ~5 GB in stale app updaters. |
@@ -500,10 +569,10 @@ Consequences worth carrying forward:
 
 | Gate | Item | Status |
 |---|---|---|
-| 0.1 | Isolated env, imports pass | **Failing** — `.venv` exists but is empty of project deps. Blocked on remote box (§9 #3) |
+| 0.1 | Isolated env, imports pass | **GREEN 2026-09-23** — on pod `xr8mzs5tq7zjm6`, run note in `integrations/deepagents_latent/runs/` (§1.2) |
 | 0.2 | Topology bound to a released link set | **Done** — Binding A (§9 #1) |
-| 0.3 | Compute target chosen | **Done** — remote AMD/ROCm (§9 #3, §1.2). Provisioning in progress |
-| 0.4 | Smoke reproduced with receiver + artifact committed | Not started (claimed done, artifact missing, receiver never loaded). Next after 0.1 |
+| 0.3 | Compute target chosen | **Done** — RunPod RTX 4090, provisioned and verified (§1.2). AMD credits still pending, not blocking |
+| 0.4 | Smoke reproduced with receiver + artifact committed | **NEXT** — checkpoints already downloaded (§1.2). Needs the Colab notebook adapted; receiver has still never been loaded |
 | 0.5 | Golden task frozen | **Done 2026-09-21** — `integrations/deepagents_latent/tasks/golden/`, 50 verifier checks green |
 | — | Design decisions frozen (§6, §9) | **Signed off 2026-09-21** |
 | — | Salvaged `instrumentation.py` + `tool_calling.py` | **Landed**, 23 tests passing (§11) |
