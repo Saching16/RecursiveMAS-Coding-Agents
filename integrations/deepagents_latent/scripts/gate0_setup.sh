@@ -27,15 +27,24 @@
 # Never "fixes" a resolver conflict by editing requirements.txt (PLAN §5.0.1).
 #
 # Usage:
-#   ./gate0_setup.sh [--backend auto|cuda|rocm] [--force]
+#   ./gate0_setup.sh [--backend auto|cuda|rocm] [--force] [--venv-path DIR]
 #                    [--rocm 6.4] [--cuda cu124] [--python python3.12]
 #
-#   --backend  which accelerator to set up; default: autodetect
-#   --force    recreate .venv if it already exists (destructive to the venv only)
-#   --rocm     ROCm minor series for the wheel index (ROCm only)
-#   --cuda     CUDA wheel tag, e.g. cu121/cu124/cu128 (CUDA only; omit to use
-#              the default PyPI wheel, which is correct on most modern boxes)
-#   --python   interpreter to build the venv from; default: autodetect >=3.11,<4.0
+#   --backend    which accelerator to set up; default: autodetect
+#   --force      recreate the venv if it exists (destructive to the venv only)
+#   --venv-path  where to build the venv; default: <repo>/.venv. Point this at
+#                LOCAL disk if the repo lives on a network volume — see below
+#   --rocm       ROCm minor series for the wheel index (ROCm only)
+#   --cuda       CUDA wheel tag, e.g. cu121/cu124/cu128 (CUDA only; omit to use
+#                the default PyPI wheel, which is correct on most modern boxes)
+#   --python     interpreter to build the venv from; default: autodetect >=3.11,<4.0
+#
+# Never build the venv on a network volume. Measured on a RunPod MooseFS mount:
+# 387 MB/s sequential (fine for model weights — 5.8 GB landed in 15 s) but
+# metadata-bound work crawls, and `pip install --upgrade pip` had not finished
+# after several minutes. Local overlay on the same box: 14.1 GB/s, ~36x faster.
+# The script warns when the venv path looks networked, but it cannot move it for
+# you. Put code + venv on local disk and keep only weights on the volume.
 
 set -euo pipefail
 
@@ -44,15 +53,17 @@ FORCE=0
 ROCM_VER=""
 CUDA_TAG=""
 PYTHON_BIN=""
+VENV_PATH=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backend) BACKEND="${2:?--backend needs auto|cuda|rocm}"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --venv-path) VENV_PATH="${2:?--venv-path needs a directory}"; shift 2 ;;
     --rocm) ROCM_VER="${2:?--rocm needs a value, e.g. 6.4}"; shift 2 ;;
     --cuda) CUDA_TAG="${2:?--cuda needs a value, e.g. cu124}"; shift 2 ;;
     --python) PYTHON_BIN="${2:?--python needs a value}"; shift 2 ;;
-    -h|--help) sed -n '3,38p' "$0"; exit 0 ;;
+    -h|--help) sed -n '3,47p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -60,7 +71,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 DEEPAGENTS_PKG="$REPO_ROOT/../deepagents/libs/deepagents"
-VENV="$REPO_ROOT/.venv"
+VENV="${VENV_PATH:-$REPO_ROOT/.venv}"
 RUNS_DIR="$SCRIPT_DIR/../runs"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 NOTE="$RUNS_DIR/gate0-$STAMP.md"
@@ -164,13 +175,33 @@ say "Virtual environment"
 
 if [[ -d "$VENV" ]]; then
   if [[ "$FORCE" == "1" ]]; then
-    rm -rf "$VENV"; ok "removed existing .venv (--force)"
+    rm -rf "$VENV"; ok "removed existing venv (--force)"
   else
-    die ".venv already exists at $VENV
-     Re-run with --force to recreate it."
+    die "venv already exists at $VENV
+     Re-run with --force to recreate it, or pass --venv-path elsewhere."
   fi
 fi
 
+# A venv on a network mount is the single most expensive mistake available
+# here, and it fails silently — pip just appears to hang. Warn loudly rather
+# than let it burn GPU-hours. Checks the nearest existing ancestor, since the
+# venv directory itself does not exist yet.
+VENV_FS_PROBE="$VENV"
+while [[ ! -d "$VENV_FS_PROBE" && "$VENV_FS_PROBE" != "/" ]]; do
+  VENV_FS_PROBE="$(dirname "$VENV_FS_PROBE")"
+done
+VENV_FSTYPE="$(df -PT "$VENV_FS_PROBE" 2>/dev/null | awk 'NR==2 {print $2}' || true)"
+case "${VENV_FSTYPE:-unknown}" in
+  nfs*|cifs|smb*|fuse*|*moosefs*|mfs*|lustre|ceph*|glusterfs|9p|sshfs|afs)
+    warn "venv path is on a NETWORK filesystem (${VENV_FSTYPE}): $VENV"
+    warn "pip is metadata-bound and crawls here; installs can take 10-100x longer."
+    warn "Strongly consider: --venv-path /root/.venv-recursivemas (local disk),"
+    warn "keeping only model weights on the network volume."
+    ;;
+  *) ok "venv filesystem: ${VENV_FSTYPE:-unknown} (not networked)" ;;
+esac
+
+mkdir -p "$(dirname "$VENV")"
 "$PYTHON_BIN" -m venv "$VENV"
 PIP="$VENV/bin/pip"
 PY="$VENV/bin/python"
@@ -308,6 +339,7 @@ mkdir -p "$RUNS_DIR"
   echo "- GPUs: $GPU_NAMES"
   echo "- torch index: ${TORCH_INDEX:-default PyPI}"
   echo "- interpreter: \`$PYTHON_BIN\` ($("$PYTHON_BIN" --version 2>&1))"
+  echo "- venv: \`$VENV\` (filesystem: ${VENV_FSTYPE:-unknown})"
   echo
   echo "## Repo state"
   echo

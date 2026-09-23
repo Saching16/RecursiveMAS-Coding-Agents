@@ -109,6 +109,36 @@ Fetched with three targeted `snapshot_repo` calls (`hf_resolver.py:11`), not
 `resolve_mas_paths` — see §2. Set `HF_HOME=/workspace/hf-cache` or they
 re-download to container disk.
 
+#### Binding A model facts (read from `config.json`, 2026-09-23)
+
+| | Code expert (source) | Summarizer (target) |
+|---|---|---|
+| `model_type` | `qwen2` | `qwen3_5_text` |
+| `hidden_size` | **2048** | **2048** |
+| `num_hidden_layers` | 36 | 24 |
+| `tie_word_embeddings` | `True` | `True` |
+| `vocab_size` | **151936** | **248320** |
+
+Three consequences:
+
+1. **`cos(in, out)` IS well-defined.** Equal hidden widths, so the §3 caveat
+   ("must be equal or the metric is undefined") is **resolved, not assumed** —
+   the Week-1 metric can be quoted as-is. This is also why `outer_2s` can
+   bridge two different architectures at all.
+2. **Both checkpoints are tied-embedding.** Per §11, LatentMAS's closed-form
+   realignment matrix is exactly identity on tied models, so it is a no-op
+   baseline on *both* ends of this binding. Nothing is lost — we use the
+   trained RecursiveLinks — but do not report the closed-form projection as a
+   meaningful comparison here.
+3. **The two agents do NOT share a tokenizer** (151936 vs 248320). This is a
+   methodological problem for the **token-capped text baseline** (§4): "cap the
+   text handoff at the same `k` tokens the latent arm gets" is ambiguous when
+   the sender and receiver tokenize differently. Freeze a convention before
+   Exp 1 and state it in the paper. Recommended: **count in the RECEIVER's
+   tokenizer**, since the budget being controlled for is what arrives in the
+   receiver's context — and the latent bundle is `latent_steps` rows in the
+   receiver's embedding space, which is the matching unit.
+
 #### Two traps found the hard way on 2026-09-23
 
 - **Never put the venv on the network volume.** `/workspace` is MooseFS:
@@ -275,7 +305,7 @@ These are claims in the docs that this tree does not currently support.
 | Notebook links `../PROPOSAL_LONGFORM.md` | **File does not exist** (superseded) | Fix the link |
 | Notebook targets Colab (`google.colab`, `cuda`, A100) | No CUDA locally | Decide local-MPS vs remote GPU before Exp 0 Step 1 |
 | `integrations/` | Does not exist | Created in Gate 1 |
-| `cos(in, out)` reported as the channel-health metric | Computed as `F.cosine_similarity(self_latent, mapped, dim=-1)` (notebook, `latent_cosine_stats`). Source and target embedding widths must be **equal** or this is undefined | Verify code-expert hidden == summarizer hidden in Gate 0.4; if unequal, redefine the metric before quoting it |
+| ~~`cos(in, out)` well-definedness unverified~~ | **RESOLVED 2026-09-23** — both checkpoints are `hidden_size: 2048` (§1.2), so `F.cosine_similarity(self_latent, mapped, dim=-1)` is well-defined and the Week-1 numbers stand as quoted | None. Metric needs no redefinition |
 | Week-1 smoke "validated the outer link" | It never downloaded the summarizer — only the source side was exercised | Gate 0.4 must load the receiver too |
 
 There is also a placeholder at
