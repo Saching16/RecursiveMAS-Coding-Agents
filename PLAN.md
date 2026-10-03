@@ -673,3 +673,5 @@ vector compounds to cosine **0.761 by step 3**. Latent trajectories are therefor
 bitwise reproducible across dtype, hardware or attention kernel. Pin dtype, record
 seeds, and expect run-to-run variance beyond sampling noise when quoting
 `cos(in, out)` or probe numbers.
+
+<!-- Snapshot probe: branch-diff workflow test, 2026-10-03. Harmless; safe to delete. -->
